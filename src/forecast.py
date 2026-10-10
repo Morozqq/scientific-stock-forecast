@@ -95,7 +95,9 @@ def run_forecast(
     if len(usable) < 100:
         raise ValueError("Not enough rows remain after feature engineering.")
     X = usable[FEATURE_COLUMNS]
-    y = usable["target_next_close"]
+    # Predict a one-session return instead of an absolute price. Returns are
+    # more comparable across price levels; convert them back to prices below.
+    y = usable["target_next_close"] / usable["Close"] - 1.0
     split = int(len(usable) * 0.8)
     if split <= 0 or split >= len(usable):
         raise ValueError("Unable to create chronological train/test split.")
@@ -109,28 +111,55 @@ def run_forecast(
         n_jobs=-1,
     )
     model.fit(X_train, y_train)
-    test_pred = model.predict(X_test)
-    rmse = float(np.sqrt(mean_squared_error(y_test, test_pred)))
-    mae = float(mean_absolute_error(y_test, test_pred))
+    test_predicted_returns = model.predict(X_test)
+    same_day_close = usable.loc[X_test.index, "Close"].to_numpy()
+    actual_test_close = usable.loc[X_test.index, "target_next_close"].to_numpy()
+    test_pred = same_day_close * (1.0 + test_predicted_returns)
+    baseline_pred = same_day_close  # persistence: tomorrow equals today's close
+    rmse = float(np.sqrt(mean_squared_error(actual_test_close, test_pred)))
+    mae = float(mean_absolute_error(actual_test_close, test_pred))
+    baseline_rmse = float(np.sqrt(mean_squared_error(actual_test_close, baseline_pred)))
+    baseline_mae = float(mean_absolute_error(actual_test_close, baseline_pred))
     # Directional accuracy: whether the predicted next close is above the
     # same day's close, compared with the actual next close.
-    same_day_close = usable.loc[X_test.index, "Close"].to_numpy()
-    actual_direction = y_test.to_numpy() > same_day_close
+    actual_direction = actual_test_close > same_day_close
     predicted_direction = test_pred > same_day_close
     directional_accuracy = float(np.mean(actual_direction == predicted_direction))
+    baseline_directional_accuracy = float(np.mean(actual_direction == (baseline_pred > same_day_close)))
 
     predictions = pd.DataFrame(
-        {"actual_next_close": y_test, "predicted_next_close": test_pred},
+        {
+            "actual_next_close": actual_test_close,
+            "predicted_next_close": test_pred,
+            "baseline_next_close": baseline_pred,
+        },
         index=X_test.index,
     )
     predictions.to_csv(output / f"{ticker.upper()}_test_predictions.csv", index_label="date")
 
-    latest_X = featured.dropna(subset=FEATURE_COLUMNS)[FEATURE_COLUMNS].iloc[[-1]]
-    next_day_forecast = float(model.predict(latest_X)[0])
+    # Evaluate only on the held-out period, then refit on all labeled history
+    # so the actual next-session forecast uses the most recent observations.
+    final_model = RandomForestRegressor(
+        n_estimators=n_estimators,
+        random_state=42,
+        min_samples_leaf=3,
+        n_jobs=-1,
+    )
+    final_model.fit(X, y)
+    latest_row = featured.dropna(subset=FEATURE_COLUMNS).iloc[[-1]]
+    latest_X = latest_row[FEATURE_COLUMNS]
+    latest_close = float(latest_row["Close"].iloc[0])
+    next_day_forecast = latest_close * (1.0 + float(final_model.predict(latest_X)[0]))
     metrics = {
         "MAE": mae,
         "RMSE": rmse,
         "directional_accuracy": directional_accuracy,
+        "baseline_MAE": baseline_mae,
+        "baseline_RMSE": baseline_rmse,
+        "baseline_directional_accuracy": baseline_directional_accuracy,
+        "MAE_improvement_vs_baseline_pct": (
+            float((baseline_mae - mae) / baseline_mae * 100.0) if baseline_mae else 0.0
+        ),
         "train_rows": float(len(X_train)),
         "test_rows": float(len(X_test)),
     }
@@ -141,7 +170,8 @@ def run_forecast(
     plt.figure(figsize=(10, 5))
     plt.plot(predictions.index, predictions["actual_next_close"], label="Actual")
     plt.plot(predictions.index, predictions["predicted_next_close"], label="Predicted")
-    plt.title(f"{ticker.upper()} next-session close: test period")
+    plt.plot(predictions.index, predictions["baseline_next_close"], label="No-change baseline", alpha=0.8)
+    plt.title(f"{ticker.upper()} next-session close: model vs baseline")
     plt.xlabel("Date")
     plt.ylabel("Adjusted close (USD)")
     plt.legend()
@@ -164,6 +194,9 @@ def main() -> None:
     print(f"MAE: {result.metrics['MAE']:.4f}")
     print(f"RMSE: {result.metrics['RMSE']:.4f}")
     print(f"Directional accuracy: {result.metrics['directional_accuracy']:.3f}")
+    print(f"Baseline MAE: {result.metrics['baseline_MAE']:.4f}")
+    print(f"Baseline RMSE: {result.metrics['baseline_RMSE']:.4f}")
+    print(f"MAE improvement vs baseline: {result.metrics['MAE_improvement_vs_baseline_pct']:.2f}%")
     print(f"Next-session estimated close: {result.next_day_forecast:.2f}")
     print(f"Outputs saved to: {result.output_dir.resolve()}")
 

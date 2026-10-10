@@ -51,6 +51,25 @@ Example for Microsoft:
 python -m src.forecast --ticker MSFT --period 2y --output outputs
 ```
 
+## Run with Docker
+
+Install Docker Desktop and make sure it is running. From the project directory, build
+the image and run the default AAPL forecast:
+
+```powershell
+docker compose build
+docker compose run --rm forecast
+```
+
+The generated chart and CSV files are written to the project's `outputs/` folder.
+To choose another ticker or period, pass arguments after the service name:
+
+```powershell
+docker compose run --rm forecast --ticker MSFT --period 2y --output /app/outputs
+```
+
+The container needs internet access to download historical data from Yahoo Finance.
+
 ## Outputs
 
 The `outputs/` directory is generated at runtime and intentionally excluded from Git:
@@ -66,9 +85,9 @@ The exact numeric results vary with the data provider, the retrieval date, and t
 2. Create returns over 1, 5, and 10 sessions; rolling return volatility; volume change; and lagged closing prices.
 3. Define the target as the next session's closing price.
 4. Sort by date and split the usable observations chronologically: first 80% for training, final 20% for testing.
-5. Train a Random Forest regressor with a fixed random seed.
-6. Report mean absolute error (MAE), root mean squared error (RMSE), and directional accuracy.
-7. Refit is not performed on the test set; a next-session estimate is produced using the latest available features after evaluation.
+5. Train a Random Forest regressor with a fixed random seed to predict next-session return, then convert the return estimate to a closing-price estimate.
+6. Compare the model with a no-change baseline (tomorrow's close equals today's close) using MAE, RMSE, and directional accuracy on the same chronological hold-out period.
+7. After reporting hold-out performance, refit a separate model on all labeled history to produce the next-session estimate. The held-out scores still come from a model that did not train on the test period.
 
 ## CI/CD
 

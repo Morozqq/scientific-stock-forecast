@@ -1,0 +1,6 @@
+services:
+  forecast:
+    build: .
+    image: scientific-stock-forecast:latest
+    volumes:
+      - ./outputs:/app/outputs
